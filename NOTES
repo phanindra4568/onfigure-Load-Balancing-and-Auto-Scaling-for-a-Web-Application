@@ -1,0 +1,252 @@
+1 — Prepare the web page & startup script
+
+index.html
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cloud Auto Scaling Demo</title>
+</head>
+<body>
+  <h2>Hello from my Cloud Instance!</h2>
+  <p>This page is served from an Ubuntu VM behind an AWS Application Load Balancer.</p>
+  <p>Instance: <strong><!--INSTANCE_ID--></strong></p>
+</body>
+</html>
+
+(We’ll inject the instance ID using the startup script so each instance shows which VM served the page.)
+
+user-data.sh (this will run when each Ubuntu instance boots)
+
+#!/bin/bash
+# Update & install apache
+apt-get update -y
+apt-get install -y apache2
+
+# Put a simple page showing instance id
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id || echo "unknown")
+cat > /var/www/html/index.html <<EOF
+<!DOCTYPE html>
+<html>
+<head><title>Cloud Auto Scaling Demo</title></head>
+<body>
+  <h2>Hello from my Cloud Instance!</h2>
+  <p>This page is served from an Ubuntu VM behind an AWS Application Load Balancer.</p>
+  <p>Instance: <strong>${INSTANCE_ID}</strong></p>
+</body>
+</html>
+EOF
+
+# Ensure apache is running
+systemctl enable apache2
+systemctl start apache2
+
+
+Save these two files. When launching EC2 instances you will paste user-data.sh into the User data field (Launch instance wizard or Launch Template).
+
+2 — Create a key pair & security group
+
+Console: EC2 Dashboard → Key Pairs → Create key pair
+
+Name: asg-demo-key (or your name). Download the .pem file and keep it safe.
+
+Console: EC2 → Security Groups → Create security group
+
+Name: asg-demo-sg
+
+Inbound rules:
+
+SSH (TCP 22) — Source: your IP (select “My IP”) — for secure SSH access
+
+HTTP (TCP 80) — Source: 0.0.0.0/0 (public web access)
+
+Outbound: default (allow all).
+
+Important: Restrict SSH to your IP for security. Do not leave 22 open to the world.
+
+3 — Create a Launch Template (recommended) or Launch Configuration
+
+We will make instances identical using a Launch Template.
+
+Console: EC2 → Launch Templates → Create launch template
+
+Template name: asg-ubuntu-template
+
+AMI: Choose the latest Ubuntu Server LTS AMI for your region (e.g., "Ubuntu Server 22.04 LTS" — pick from the AMI list).
+
+Instance type: t2.micro (free tier eligible) or t3.micro (if t2 not in region).
+
+Key pair: select asg-demo-key.
+
+Network settings / Security group: choose asg-demo-sg.
+
+Advanced: User data: paste contents of user-data.sh (script above).
+
+Storage: default (8 GB is fine).
+
+Leave other options default. Create the template.
+
+4 — Create an Application Load Balancer (ALB)
+
+Console: EC2 → Load Balancers → Create Load Balancer → Application Load Balancer
+
+Name: asg-demo-alb
+
+Scheme: internet-facing
+
+IP address type: ipv4
+
+Listeners: keep HTTP :80
+
+Availability Zones: enable at least 2 AZs if possible (select the VPC and two subnets). ALB across multiple AZs gives high availability.
+
+Target group:
+
+Create a new target group during LB setup.
+
+Target type: instance
+
+Name: asg-demo-tg
+
+Protocol: HTTP, port 80
+
+Health check path: / (or /index.html) — leave interval defaults (30s) or use recommended.
+
+Skip manually registering instances here (we’ll attach ASG to this target group). Finish and create the ALB.
+
+After creation, note the DNS name of the ALB (the public URL) shown in the Load Balancer description — that will serve your page.
+
+5 — Create an Auto Scaling Group (ASG)
+
+Console: EC2 → Auto Scaling → Auto Scaling Groups → Create Auto Scaling group
+
+Choose launch template: select asg-ubuntu-template.
+
+Choose the target group: select asg-demo-tg (the ALB target group you created).
+
+Name ASG: asg-demo-asg
+
+Network: choose the same VPC, and pick subnets across 2 AZs for fault tolerance.
+
+Set sizes:
+
+Minimum capacity: 1
+
+Desired capacity: 2 (so you have two running initially)
+
+Maximum capacity: 4
+
+Configure scaling policies:
+
+Choose Target tracking scaling policy (easier).
+
+Target value: 60% (average CPU utilization threshold). Use “Average CPU utilization” as the metric.
+
+Optional — set cooldown defaults.
+
+Review and create the ASG.
+
+The ASG will now launch Desired = 2 instances using the Launch Template, register them to the ALB target group, and run the user-data.sh to serve your page.
+
+6 — Verify everything is working
+
+Wait a minute for instances to launch. In Console:
+
+EC2 → Instances — you should see two new instances running with name or launch template tags.
+
+Click one instance and check Instance ID and Public IPv4 (if assigned) and Status checks.
+
+ALB Target Group health:
+
+EC2 → Target Groups → asg-demo-tg → Targets
+
+You should see your instances listed and their Health as healthy (green).
+
+Visit the ALB URL (DNS name from the Load Balancer) in your browser:
+http://<your-alb-dns-name>
+You should see the page with Instance: i-xxxxxxxx — refresh multiple times to see possibly different instance IDs (if requests hit different instances).
+
+7 — How to test scaling (generate load)
+
+You can use ab (ApacheBench) from your local machine or a remote machine (be wary of bandwidth and AWS limits).
+
+Install ApacheBench (on Ubuntu):
+
+sudo apt-get update -y
+sudo apt-get install -y apache2-utils
+
+
+Run a load test against the ALB URL:
+
+ab -n 1000 -c 50 http://<your-alb-dns-name>/
+
+
+-n 1000 requests total, -c 50 concurrency
+
+What to monitor:
+
+EC2 console → Auto Scaling Groups → Activity history: you should see scale-out events (new instance launches) if the average CPU exceeded the target.
+
+EC2 → Instances: new instances appear and are registered to the target group.
+
+ALB → Target Group: more healthy targets appear.
+
+Note: Scaling may take a couple of minutes (instance boot time + registration + health checks). If using a target-tracking policy (target CPU 60%), ASG will add instances automatically.
+
+8 — Take the required screenshots
+
+You need three screenshots as deliverables. Open the AWS Console pages and capture them.
+
+Load Balancer dashboard showing backend instances
+
+Console: EC2 → Load Balancers → select asg-demo-alb → Description/Targets
+
+Or go to Target Groups → asg-demo-tg → Targets showing instance IDs and health.
+
+Auto Scaling configuration
+
+Console: EC2 → Auto Scaling → Auto Scaling Groups → select asg-demo-asg → Details / Activity history / Instances
+
+Screenshot the ASG details page showing min/desired/max and the scaling policies.
+
+Public load balancer URL (working app)
+
+Open http://<your-alb-dns-name>/ in a browser and screenshot the page showing the instance ID line.
+
+How to take screenshots (common ways):
+
+Windows: PrtScn or Win + Shift + S then paste into clipboard.
+
+macOS: Cmd + Shift + 4 and select area.
+
+Linux: PrtScn or gnome-screenshot.
+Save images as PNG/JPG.
+
+9 — Clean up (important to avoid charges)
+
+When you’re done, delete resources in this order:
+
+Auto Scaling Group: EC2 → Auto Scaling → Auto Scaling Groups → select asg-demo-asg → Delete (this terminates instances).
+
+Load Balancer: EC2 → Load Balancers → select asg-demo-alb → Delete.
+
+Target group: EC2 → Target Groups → delete asg-demo-tg.
+
+Launch template: EC2 → Launch Templates → delete asg-ubuntu-template.
+
+Security group: EC2 → Security Groups → delete asg-demo-sg (ensure no other resources use it).
+
+Key pair: you can delete the key from AWS console once you’ve saved it locally.
+
+Any snapshots or volumes created: check EC2 → Volumes and delete unattached volumes.
+
+10 — Extra helpful CLI commands (optional)
+
+If you prefer AWS CLI (configure with aws configure), you can list instances and see their tags:
+
+aws ec2 describe-instances --filters "Name=tag:aws:autoscaling:groupName,Values=asg-demo-asg" --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,AZ:Placement.AvailabilityZone}' --output table
+
+
+Check ASG activity (CLI):
+
+aws autoscaling describe-scaling-activities --auto-scaling-group-name asg-demo-as
